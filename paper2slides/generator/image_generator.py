@@ -33,6 +33,7 @@ from ..prompts.image_generation import (
     SLIDE_FIGURE_HINT,
     POSTER_FIGURE_HINT,
 )
+from ..agent_runtime import runtime, AgentTaskInput
 
 
 @dataclass
@@ -59,12 +60,14 @@ def process_custom_style(client: OpenAI, user_style: str, model: str = None) -> 
     model = model or os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
     
     try:
-        response = client.chat.completions.create(
+        task_input = AgentTaskInput(
+            task_name="generate.process_custom_style",
             model=model,
             messages=[{"role": "user", "content": STYLE_PROCESS_PROMPT.format(user_style=user_style)}],
-            response_format={"type": "json_object"},
+            options={"response_format": {"type": "json_object"}},
         )
-        result = json.loads(response.choices[0].message.content)
+        task_output = runtime.run_openai_task(client, task_input)
+        result = json.loads(task_output.content)
         return ProcessedStyle(
             style_name=result.get("style_name", ""),
             color_tone=result.get("color_tone", ""),

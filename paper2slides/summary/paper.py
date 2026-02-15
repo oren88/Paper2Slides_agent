@@ -11,6 +11,7 @@ from pathlib import Path
 from .clean import clean_references
 from ..rag import RAGQueryResult
 from ..prompts.paper_extraction import EXTRACT_PROMPTS
+from ..agent_runtime import runtime, AgentTaskInput
 
 
 SUMMARY_SECTIONS: List[str] = ["paper_info", "motivation", "solution", "results", "contributions"]
@@ -163,16 +164,18 @@ async def _extract_section(
     
     # Run sync LLM call in executor for async compatibility
     loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        None,
-        lambda: llm_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=4000,
-        )
+    task_input = AgentTaskInput(
+        task_name=f"summary.extract_section.{section}",
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"max_tokens": 4000},
     )
-    
-    return response.choices[0].message.content or ""
+    task_output = await loop.run_in_executor(
+        None,
+        lambda: runtime.run_openai_task(llm_client, task_input)
+    )
+
+    return task_output.content
 
 
 async def extract_paper(
@@ -352,16 +355,15 @@ async def extract_paper_metadata_from_markdown(
         prompt = _build_multi_file_prompt(file_headers)
     
     loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        None,
-        lambda: llm_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
-            temperature=0.1,  # Low temperature for accuracy
-        )
+    task_input = AgentTaskInput(
+        task_name="summary.extract_paper_metadata",
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"max_tokens": 1500, "temperature": 0.1},
     )
-    
-    result = response.choices[0].message.content or ""
-    
-    return result
+    task_output = await loop.run_in_executor(
+        None,
+        lambda: runtime.run_openai_task(llm_client, task_input)
+    )
+
+    return task_output.content
