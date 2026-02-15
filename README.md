@@ -246,6 +246,22 @@ Use normal mode (default) when:
 - Multiple files to process together
 - Need retrieval for better context selection
 
+### 🤖 LLM Task Routing (Agent Runtime)
+
+Paper2Slides now routes core LLM calls through a centralized `AgentRuntime` instead of invoking provider APIs directly in each module.
+
+Current task routes:
+
+| Module | Task Name | Purpose |
+|--------|-----------|---------|
+| `rag_stage` | `rag.fast_query` | Fast-mode category query execution |
+| `summary.paper` | `summary.extract_section.*` | Section-level structured extraction |
+| `summary.paper` | `summary.extract_paper_metadata` | Metadata extraction from markdown |
+| `generator.content_planner` | `plan.content_sections` | Slide/poster content planning |
+| `generator.image_generator` | `generate.process_custom_style` | Custom style normalization |
+
+This provides a consistent delegation boundary (`task_name + input messages + model options`) and makes future migration to specialized agents easier.
+
 ---
 
 ## ⚙️ Configuration

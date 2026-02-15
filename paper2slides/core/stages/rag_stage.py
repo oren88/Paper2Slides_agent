@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 
 from ...utils import save_json
 from ..paths import get_rag_checkpoint
+from ...agent_runtime import runtime, AgentTaskInput, FastRagQueryOutput
 
 logger = logging.getLogger(__name__)
 
@@ -205,31 +206,29 @@ Please provide a detailed answer based on the content and images above."""
                 })
                 
                 # Call OpenAI API
-                response = await asyncio.to_thread(
-                    lambda: client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.3,
-                    )
+                task_input = AgentTaskInput(
+                    task_name="rag.fast_query",
+                    model=model,
+                    messages=messages,
+                    options={"temperature": 0.3},
                 )
-                
-                answer = response.choices[0].message.content
-                
-                return (category, idx, {
-                    "query": query,
-                    "answer": answer,
-                    "mode": "fast_direct_with_vision",
-                    "success": True,
-                })
+                task_output = await asyncio.to_thread(lambda: runtime.run_openai_task(client, task_input))
+
+                result = FastRagQueryOutput(
+                    query=query,
+                    answer=task_output.content,
+                    success=True,
+                )
+                return (category, idx, result.__dict__)
             except Exception as e:
                 logger.error(f"Query failed: {query[:50]}... Error: {e}")
-                return (category, idx, {
-                    "query": query,
-                    "answer": None,
-                    "mode": "fast_direct_with_vision",
-                    "success": False,
-                    "error": str(e),
-                })
+                result = FastRagQueryOutput(
+                    query=query,
+                    answer=None,
+                    success=False,
+                    error=str(e),
+                )
+                return (category, idx, result.__dict__)
     
     # Create all tasks
     tasks = []

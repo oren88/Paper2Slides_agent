@@ -19,6 +19,7 @@ from ..prompts.content_planning import (
     GENERAL_POSTER_PLANNING_PROMPT,
     GENERAL_POSTER_DENSITY_GUIDELINES,
 )
+from ..agent_runtime import runtime, AgentTaskInput
 
 
 @dataclass
@@ -293,12 +294,14 @@ class ContentPlanner:
         
         try:
             logger.info(f"Calling {self.model} with max_tokens={self.max_tokens}")
-            response = self.client.chat.completions.create(
+            task_input = AgentTaskInput(
+                task_name="plan.content_sections",
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
-                max_tokens=self.max_tokens,
+                options={"max_tokens": self.max_tokens},
             )
-            result = response.choices[0].message.content or ""
+            task_output = runtime.run_openai_task(self.client, task_input)
+            result = task_output.content
             logger.info(f"LLM returned {len(result)} characters")
             return result
         except Exception as e:
