@@ -6,6 +6,7 @@ import sys
 import uuid
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Optional
 
@@ -33,8 +34,19 @@ from paper2slides.utils import setup_logging
 # Configuration - use project root directories
 UPLOAD_DIR = PROJECT_ROOT / "sources" / "uploads"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
+INBOX_DIR = PROJECT_ROOT / "sources" / "inbox"
+INBOX_QUEUE_DIR = PROJECT_ROOT / "sources" / "inbox_queue"
+INBOX_REJECTED_DIR = PROJECT_ROOT / "sources" / "inbox_rejected"
+INBOX_DONE_DIR = PROJECT_ROOT / "sources" / "inbox_done"
+ALLOWED_INBOX_EXTENSIONS = {".pdf"}
+INBOX_POLL_INTERVAL_SECONDS = 2
+
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+INBOX_DIR.mkdir(parents=True, exist_ok=True)
+INBOX_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+INBOX_REJECTED_DIR.mkdir(parents=True, exist_ok=True)
+INBOX_DONE_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Paper2Slides API", version="1.0.0")
 
@@ -84,6 +96,153 @@ class SessionManager:
 
 session_manager = SessionManager()
 
+
+class InboxQueueManager:
+    """Watch INBOX folder and process valid files sequentially."""
+
+    def __init__(self):
+        self.job_queue = asyncio.Queue()
+        self.status = {}
+        self.watcher_task = None
+        self.worker_task = None
+
+    def _is_valid_file(self, file_path: Path) -> bool:
+        return file_path.suffix.lower() in ALLOWED_INBOX_EXTENSIONS
+
+    async def _watcher_loop(self):
+        logger.info(f"INBOX watcher started: {INBOX_DIR}")
+        while True:
+            try:
+                for file_path in sorted(INBOX_DIR.iterdir()):
+                    if not file_path.is_file():
+                        continue
+
+                    if not self._is_valid_file(file_path):
+                        target = INBOX_REJECTED_DIR / file_path.name
+                        target = self._resolve_collision(target)
+                        shutil.move(str(file_path), str(target))
+                        logger.warning(f"Rejected file moved to inbox_rejected: {target.name}")
+                        continue
+
+                    staged_target = INBOX_QUEUE_DIR / file_path.name
+                    staged_target = self._resolve_collision(staged_target)
+                    shutil.move(str(file_path), str(staged_target))
+
+                    session_id = str(uuid.uuid4())
+                    session_dir = UPLOAD_DIR / session_id
+                    session_dir.mkdir(parents=True, exist_ok=True)
+                    upload_path = session_dir / staged_target.name
+                    shutil.move(str(staged_target), str(upload_path))
+
+                    file_info = {
+                        "filename": upload_path.name,
+                        "path": str(upload_path),
+                        "size": upload_path.stat().st_size,
+                    }
+                    job = {
+                        "session_id": session_id,
+                        "files": [file_info],
+                        "content": "paper",
+                        "output_type": "slides",
+                        "style": "doraemon",
+                        "length": "medium",
+                        "density": "medium",
+                        "fast_mode": False,
+                        "message": "",
+                    }
+                    self.status[session_id] = {
+                        "source_file": upload_path.name,
+                        "state": "queued",
+                    }
+                    await self.job_queue.put(job)
+                    logger.info(f"Queued INBOX job session={session_id[:8]} file={upload_path.name}")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"INBOX watcher error: {exc}", exc_info=True)
+
+            await asyncio.sleep(INBOX_POLL_INTERVAL_SECONDS)
+
+    async def _worker_loop(self):
+        logger.info("INBOX queue worker started")
+        while True:
+            job = await self.job_queue.get()
+            session_id = job["session_id"]
+            try:
+                self.status[session_id]["state"] = "processing"
+
+                while session_manager.get_running_session() is not None:
+                    await asyncio.sleep(1)
+
+                await run_pipeline_background(
+                    session_id=session_id,
+                    message=job["message"],
+                    files=job["files"],
+                    content=job["content"],
+                    output_type=job["output_type"],
+                    style=job["style"],
+                    length=job["length"],
+                    density=job["density"],
+                    fast_mode=job["fast_mode"],
+                    session_manager=session_manager,
+                )
+
+                result = getattr(app.state, "results", {}).get(session_id, {})
+                if isinstance(result, dict) and "error" in result:
+                    self.status[session_id]["state"] = "failed"
+                    self.status[session_id]["error"] = result["error"]
+                else:
+                    self.status[session_id]["state"] = "completed"
+
+                src_path = Path(job["files"][0]["path"])
+                if src_path.exists():
+                    done_target = INBOX_DONE_DIR / src_path.name
+                    done_target = self._resolve_collision(done_target)
+                    shutil.move(str(src_path), str(done_target))
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"INBOX worker error for {session_id[:8]}: {exc}", exc_info=True)
+                self.status.setdefault(session_id, {})["state"] = "failed"
+                self.status[session_id]["error"] = str(exc)
+            finally:
+                self.job_queue.task_done()
+
+    @staticmethod
+    def _resolve_collision(target: Path) -> Path:
+        if not target.exists():
+            return target
+        stem = target.stem
+        suffix = target.suffix
+        idx = 1
+        while True:
+            candidate = target.with_name(f"{stem}_{idx}{suffix}")
+            if not candidate.exists():
+                return candidate
+            idx += 1
+
+    async def start(self):
+        if self.watcher_task is None:
+            self.watcher_task = asyncio.create_task(self._watcher_loop())
+        if self.worker_task is None:
+            self.worker_task = asyncio.create_task(self._worker_loop())
+
+    async def stop(self):
+        for task in [self.watcher_task, self.worker_task]:
+            if task:
+                task.cancel()
+        for task in [self.watcher_task, self.worker_task]:
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+
+inbox_queue_manager = InboxQueueManager()
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -97,6 +256,21 @@ app.add_middleware(
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 # Mount uploads directory for serving uploaded source files
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+
+@app.on_event("startup")
+async def on_startup():
+    await inbox_queue_manager.start()
+    logger.info(
+        "INBOX automation enabled | allowed_extensions=%s | inbox=%s",
+        sorted(ALLOWED_INBOX_EXTENSIONS),
+        INBOX_DIR,
+    )
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await inbox_queue_manager.stop()
 
 
 class ChatResponse(BaseModel):
@@ -125,6 +299,17 @@ async def get_running_session():
     return {
         "has_running_session": running_session is not None,
         "running_session_id": running_session[:8] if running_session else None
+    }
+
+
+@app.get("/api/inbox/status")
+async def get_inbox_status():
+    """Get INBOX queue status and accepted file formats."""
+    return {
+        "inbox": str(INBOX_DIR),
+        "allowed_extensions": sorted(ALLOWED_INBOX_EXTENSIONS),
+        "queued_jobs": inbox_queue_manager.job_queue.qsize(),
+        "jobs": inbox_queue_manager.status,
     }
 
 
@@ -770,4 +955,3 @@ if __name__ == "__main__":
         limit_concurrency=10,    
         limit_max_requests=1000  
     )
-

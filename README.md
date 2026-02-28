@@ -213,6 +213,24 @@ Access the web interface at `http://localhost:5173` (default)
 </table>
 </div>
 
+
+### 4. INBOX Queue Server Mode (Auto Processing)
+
+The backend now runs an **INBOX watcher + sequential queue worker**:
+
+- Watch folder: `sources/inbox/`
+- Queue mode: files are enqueued and processed **one-by-one**
+- Allowed input format: **PDF only** (`.pdf`)
+- Invalid files: automatically moved to `sources/inbox_rejected/`
+- Successfully dequeued source files: moved to `sources/inbox_done/`
+- INBOX target state: kept empty after scan/move cycle
+
+Check queue status:
+
+```bash
+curl http://localhost:8001/api/inbox/status
+```
+
 ---
 
 ## 🏗️ Paper2Slides Framework
